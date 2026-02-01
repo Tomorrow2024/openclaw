@@ -43,11 +43,20 @@ type ExtensionForwardEventMessage = {
 
 type ExtensionPingMessage = { method: "ping" };
 type ExtensionPongMessage = { method: "pong" };
+type ExtensionLogMessage = { method: "log"; params: { level: string; message: string } };
+type ExtensionConnectMessage = {
+  type: "req";
+  method: "connect";
+  id: string | number;
+  params: unknown;
+};
 
 type ExtensionMessage =
   | ExtensionResponseMessage
   | ExtensionForwardEventMessage
-  | ExtensionPongMessage;
+  | ExtensionPongMessage
+  | ExtensionLogMessage
+  | ExtensionConnectMessage;
 
 type TargetInfo = {
   targetId: string;
@@ -147,6 +156,7 @@ function text(res: Duplex, status: number, bodyText: string) {
 }
 
 function rejectUpgrade(socket: Duplex, status: number, bodyText: string) {
+  console.log(`[ExtensionRelay] Rejecting upgrade: status=${status} body=${bodyText}`);
   text(socket, status, bodyText);
   try {
     socket.destroy();
@@ -241,14 +251,18 @@ export async function ensureChromeExtensionRelayServer(opts: {
   };
 
   const routeCdpCommand = async (cmd: CdpCommand): Promise<unknown> => {
+    console.log(
+      `[ExtensionRelay] Route command: ${cmd.method} id=${cmd.id} session=${cmd.sessionId}`,
+    );
     switch (cmd.method) {
       case "Browser.getVersion":
         return {
           protocolVersion: "1.3",
-          product: "Chrome/OpenClaw-Extension-Relay",
-          revision: "0",
-          userAgent: "OpenClaw-Extension-Relay",
-          jsVersion: "V8",
+          product: "HeadlessChrome/120.0.6099.109",
+          revision: "@d1c2c4e5a6f7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
+          userAgent:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0.6099.109 Safari/537.36",
+          jsVersion: "12.0.267.10",
         };
       case "Browser.setDownloadBehavior":
         return {};
@@ -296,6 +310,9 @@ export async function ensureChromeExtensionRelayServer(opts: {
       }
       default: {
         const id = nextExtensionId++;
+        console.log(
+          `[ExtensionRelay] Forwarding to extension: ${cmd.method} id=${id} session=${cmd.sessionId}`,
+        );
         return await sendToExtension({
           id,
           method: "forwardCDPCommand",
@@ -421,22 +438,29 @@ export async function ensureChromeExtensionRelayServer(opts: {
   });
 
   const wssExtension = new WebSocketServer({ noServer: true });
-  const wssCdp = new WebSocketServer({ noServer: true });
+  const wssCdp = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", info.baseUrl);
     const pathname = url.pathname;
     const remote = req.socket.remoteAddress;
 
+    console.log(`[ExtensionRelay] Upgrade request: path=${pathname} remote=${remote}`);
+
     if (!isLoopbackAddress(remote)) {
+      console.log(`[ExtensionRelay] Rejected non-loopback: ${remote}`);
       rejectUpgrade(socket, 403, "Forbidden");
       return;
     }
 
     if (pathname === "/extension") {
       if (extensionWs) {
-        rejectUpgrade(socket, 409, "Extension already connected");
-        return;
+        console.log("[ExtensionRelay] Replacing existing extension connection");
+        try {
+          extensionWs.close();
+        } catch {
+          // ignore
+        }
       }
       wssExtension.handleUpgrade(req, socket, head, (ws) => {
         wssExtension.emit("connection", ws, req);
@@ -459,6 +483,7 @@ export async function ensureChromeExtensionRelayServer(opts: {
   });
 
   wssExtension.on("connection", (ws) => {
+    console.log("[ExtensionRelay] Extension connected");
     extensionWs = ws;
 
     const ping = setInterval(() => {
@@ -466,13 +491,44 @@ export async function ensureChromeExtensionRelayServer(opts: {
         return;
       }
       ws.send(JSON.stringify({ method: "ping" } satisfies ExtensionPingMessage));
-    }, 5000);
+    }, 30_000);
 
     ws.on("message", (data) => {
       let parsed: ExtensionMessage | null = null;
       try {
         parsed = JSON.parse(rawDataToString(data)) as ExtensionMessage;
       } catch {
+        return;
+      }
+
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "method" in parsed &&
+        (parsed as ExtensionLogMessage).method === "log"
+      ) {
+        const log = parsed as ExtensionLogMessage;
+        console.log(`[ExtensionRelay] Client log [${log.params.level}]: ${log.params.message}`);
+        return;
+      }
+
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "method" in parsed &&
+        (parsed as ExtensionConnectMessage).method === "connect"
+      ) {
+        const connectMsg = parsed as ExtensionConnectMessage;
+        console.log(`[ExtensionRelay] Client handshake:`, JSON.stringify(connectMsg.params));
+        // Respond to handshake so client knows we are ready
+        if (connectMsg.id) {
+          ws.send(
+            JSON.stringify({
+              id: connectMsg.id,
+              result: "connected",
+            }),
+          );
+        }
         return;
       }
 
@@ -486,7 +542,7 @@ export async function ensureChromeExtensionRelayServer(opts: {
         if ("error" in parsed && typeof parsed.error === "string" && parsed.error.trim()) {
           pending.reject(new Error(parsed.error));
         } else {
-          pending.resolve(parsed.result);
+          pending.resolve((parsed as ExtensionResponseMessage).result);
         }
         return;
       }
@@ -506,12 +562,19 @@ export async function ensureChromeExtensionRelayServer(opts: {
           return;
         }
 
+        // DEBUG LOGGING
+        if (method.startsWith("Target.")) {
+          console.log(`[ExtensionRelay] Received CDP event: ${method}`, { sessionId, params });
+        }
+
         if (method === "Target.attachedToTarget") {
           const attached = (params ?? {}) as AttachedToTargetEvent;
           const targetType = attached?.targetInfo?.type ?? "page";
-          if (targetType !== "page") {
-            return;
-          }
+          console.log(`[ExtensionRelay] Target.attachedToTarget:`, attached);
+          // if (targetType !== "page") {
+          //    console.log(`[ExtensionRelay] Ignoring non-page target type: ${targetType}`);
+          //    return;
+          // }
           if (attached?.sessionId && attached?.targetInfo?.targetId) {
             const prev = connectedTargets.get(attached.sessionId);
             const nextTargetId = attached.targetInfo.targetId;
@@ -522,6 +585,11 @@ export async function ensureChromeExtensionRelayServer(opts: {
               targetId: nextTargetId,
               targetInfo: attached.targetInfo,
             });
+            console.log(
+              `[ExtensionRelay] Connected target registered:`,
+              attached.sessionId,
+              nextTargetId,
+            );
             if (changedTarget && prevTargetId) {
               broadcastToCdpClients({
                 method: "Target.detachedFromTarget",
@@ -569,8 +637,11 @@ export async function ensureChromeExtensionRelayServer(opts: {
     });
 
     ws.on("close", () => {
+      console.log("[ExtensionRelay] Extension disconnected");
       clearInterval(ping);
-      extensionWs = null;
+      if (extensionWs === ws) {
+        extensionWs = null;
+      }
       for (const [, pending] of pendingExtension) {
         clearTimeout(pending.timer);
         pending.reject(new Error("extension disconnected"));
@@ -589,7 +660,8 @@ export async function ensureChromeExtensionRelayServer(opts: {
     });
   });
 
-  wssCdp.on("connection", (ws) => {
+  wssCdp.on("connection", (ws, req) => {
+    console.log(`[ExtensionRelay] New CDP connection from ${req.socket.remoteAddress}`);
     cdpClients.add(ws);
 
     ws.on("message", async (data) => {
@@ -661,6 +733,10 @@ export async function ensureChromeExtensionRelayServer(opts: {
 
     ws.on("close", () => {
       cdpClients.delete(ws);
+    });
+
+    ws.on("error", (err) => {
+      console.error(`[ExtensionRelay] CDP client error:`, err);
     });
   });
 

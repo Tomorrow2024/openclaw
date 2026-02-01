@@ -161,6 +161,11 @@ export function registerBrowserAgentSnapshotRoutes(
       return;
     }
     const targetId = typeof req.query.targetId === "string" ? req.query.targetId.trim() : "";
+
+    console.log(
+      `[Snapshot] Request received for targetId=${targetId}, profile=${profileCtx.profile.name}, driver=${profileCtx.profile.driver}, cdpUrl=${profileCtx.profile.cdpUrl}`,
+    );
+
     const mode = req.query.mode === "efficient" ? "efficient" : undefined;
     const labels = toBoolean(req.query.labels) ?? undefined;
     const explicitFormat =

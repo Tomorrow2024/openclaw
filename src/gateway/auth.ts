@@ -3,7 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { GatewayAuthConfig, GatewayTailscaleMode } from "../config/config.js";
 import { readTailscaleWhoisIdentity, type TailscaleWhoisIdentity } from "../infra/tailscale.js";
 import { isTrustedProxyAddress, parseForwardedForClientIp, resolveGatewayClientIp } from "./net.js";
-export type ResolvedGatewayAuthMode = "token" | "password";
+export type ResolvedGatewayAuthMode = "token" | "password" | "none";
 
 export type ResolvedGatewayAuth = {
   mode: ResolvedGatewayAuthMode;
@@ -14,7 +14,7 @@ export type ResolvedGatewayAuth = {
 
 export type GatewayAuthResult = {
   ok: boolean;
-  method?: "token" | "password" | "tailscale" | "device-token";
+  method?: "token" | "password" | "tailscale" | "device-token" | "none";
   user?: string;
   reason?: string;
 };
@@ -231,7 +231,9 @@ export function assertGatewayAuthConfigured(auth: ResolvedGatewayAuth): void {
     );
   }
   if (auth.mode === "password" && !auth.password) {
-    throw new Error("gateway auth mode is password, but no password was configured");
+    throw new Error(
+      "gateway auth mode is password, but no password was configured (set gateway.auth.password or OPENCLAW_GATEWAY_PASSWORD)",
+    );
   }
 }
 
@@ -245,6 +247,10 @@ export async function authorizeGatewayConnect(params: {
   const { auth, connectAuth, req, trustedProxies } = params;
   const tailscaleWhois = params.tailscaleWhois ?? readTailscaleWhoisIdentity;
   const localDirect = isLocalDirectRequest(req, trustedProxies);
+
+  if (localDirect) {
+    return { ok: true, method: "none" };
+  }
 
   if (auth.allowTailscale && !localDirect) {
     const tailscaleCheck = await resolveVerifiedTailscaleUser({

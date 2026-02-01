@@ -311,9 +311,6 @@ export async function browserSnapshot(
   if (typeof opts.compact === "boolean") {
     q.set("compact", String(opts.compact));
   }
-  if (typeof opts.depth === "number" && Number.isFinite(opts.depth)) {
-    q.set("depth", String(opts.depth));
-  }
   if (opts.selector?.trim()) {
     q.set("selector", opts.selector.trim());
   }
@@ -329,7 +326,9 @@ export async function browserSnapshot(
   if (opts.profile) {
     q.set("profile", opts.profile);
   }
-  return await fetchBrowserJson<SnapshotResult>(withBaseUrl(baseUrl, `/snapshot?${q.toString()}`), {
+  const url = withBaseUrl(baseUrl, `/snapshot?${q.toString()}`);
+  console.log(`[BrowserClient] Fetching snapshot: ${url}`);
+  return await fetchBrowserJson<SnapshotResult>(url, {
     timeoutMs: 20000,
   });
 }

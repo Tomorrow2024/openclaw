@@ -448,6 +448,9 @@ export async function getPageForTargetId(opts: {
     return first;
   }
   const found = await findPageByTargetId(browser, opts.targetId, opts.cdpUrl);
+  console.log(
+    `[PwSession] findPageByTargetId: ${opts.targetId} -> ${found ? "found" : "not found"}`,
+  );
   if (!found) {
     // Extension relays can block CDP attachment APIs (e.g. Target.attachToBrowserTarget),
     // which prevents us from resolving a page's targetId via newCDPSession(). If Playwright

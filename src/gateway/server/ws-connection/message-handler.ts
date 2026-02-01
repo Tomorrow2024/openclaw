@@ -235,6 +235,7 @@ export function attachGatewayWsMessageHandler(params: {
       return;
     }
     const text = rawDataToString(data);
+    console.log(`[WS-DEBUG] ${connId} message:`, text.slice(0, 1000));
     try {
       const parsed = JSON.parse(text);
       const frameType =
@@ -400,7 +401,8 @@ export function attachGatewayWsMessageHandler(params: {
           }
 
           // Allow token-authenticated connections (e.g., control-ui) to skip device identity
-          if (!canSkipDevice) {
+          // Also allow local clients to skip device identity (e.g. browser extension)
+          if (!canSkipDevice && !isLocalClient) {
             setHandshakeState("failed");
             setCloseCause("device-required", {
               client: connectParams.client.id,

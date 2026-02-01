@@ -1,10 +1,10 @@
 const DEFAULT_PORT = 18792
 
 const BADGE = {
-  on: { text: 'ON', color: '#FF5A36' },
+  on: { text: 'ON', color: '#00FF00' },
   off: { text: '', color: '#000000' },
-  connecting: { text: '…', color: '#F59E0B' },
-  error: { text: '!', color: '#B91C1C' },
+  connecting: { text: '…', color: '#FFFF00' },
+  error: { text: '!', color: '#FF0000' },
 }
 
 /** @type {WebSocket|null} */
@@ -72,6 +72,21 @@ async function ensureRelayConnection() {
       const t = setTimeout(() => reject(new Error('WebSocket connect timeout')), 5000)
       ws.onopen = () => {
         clearTimeout(t)
+        ws.send(JSON.stringify({
+          type: 'req',
+          method: 'connect',
+          id: 'handshake-1',
+          params: {
+            minProtocol: 1,
+            maxProtocol: 3,
+            client: {
+              id: 'gateway-client',
+              version: '1.0.0',
+              platform: 'chrome-extension',
+              mode: 'ui',
+            },
+          },
+        }))
         resolve()
       }
       ws.onerror = () => {
@@ -301,11 +316,24 @@ async function connectOrToggleForActiveTab() {
   })
 
   try {
-    await ensureRelayConnection()
-    await attachTab(tabId)
-  } catch (err) {
-    tabs.delete(tabId)
-    setBadge(tabId, 'error')
+        await ensureRelayConnection()
+        await attachTab(tabId)
+      } catch (err) {
+        // Log error to relay for debugging
+        try {
+          if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+            relayWs.send(JSON.stringify({
+              method: 'log',
+              params: {
+                level: 'error',
+                message: `Attach failed for tab ${tabId}: ${err instanceof Error ? err.message : String(err)} Stack: ${nowStack()}`
+              }
+            }))
+          }
+        } catch {}
+
+        tabs.delete(tabId)
+        setBadge(tabId, 'error')
     void chrome.action.setTitle({
       tabId,
       title: 'OpenClaw Browser Relay: relay not running (open options for setup)',
@@ -435,4 +463,30 @@ chrome.action.onClicked.addListener(() => void connectOrToggleForActiveTab())
 chrome.runtime.onInstalled.addListener(() => {
   // Useful: first-time instructions.
   void chrome.runtime.openOptionsPage()
+})
+
+// Auto-connect to all tabs
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url && /^https?:/.test(tab.url)) {
+    const existing = tabs.get(tabId)
+    if (existing && existing.state === 'connected') return
+
+    void (async () => {
+      // Avoid race conditions: set connecting immediately
+      tabs.set(tabId, { state: 'connecting' })
+      setBadge(tabId, 'connecting')
+
+      try {
+        await ensureRelayConnection()
+        await attachTab(tabId)
+      } catch (err) {
+        // If auto-connect fails (e.g. relay down), silent fail or error badge
+        // But don't spam error badge if relay is just down for everyone
+        tabs.delete(tabId)
+        // Only show error if it's not just "relay unreachable" to avoid red noise?
+        // For now, consistent behavior with click:
+        setBadge(tabId, 'error') 
+      }
+    })()
+  }
 })
